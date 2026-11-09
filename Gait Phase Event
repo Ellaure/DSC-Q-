@@ -1,0 +1,1087 @@
+unit Unit2;
+
+interface
+
+uses
+  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
+  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, VclTee.TeeGDIPlus, Vcl.StdCtrls,
+  Vcl.Buttons, VCLTee.TeEngine, VCLTee.Series, Vcl.ExtCtrls, VCLTee.TeeProcs,
+  VCLTee.Chart, Vcl.ComCtrls, System.JSON,
+  System.IOUtils;
+
+type
+  TForm2 = class(TForm)
+    PageControl1: TPageControl;
+    TabSheet2: TTabSheet;
+    Chart1: TChart;
+    Series1: TLineSeries;
+    Series2: TLineSeries;
+    Button1: TButton;
+    Button2: TButton;
+    GroupBox1: TGroupBox;
+    Edit1: TEdit;
+    Label1: TLabel;
+    Label2: TLabel;
+    Edit2: TEdit;
+    GroupBox2: TGroupBox;
+    Label3: TLabel;
+    Label4: TLabel;
+    Edit3: TEdit;
+    Edit4: TEdit;
+    Label5: TLabel;
+    Edit5: TEdit; // Target Error (MSE)
+    Button3: TButton;
+    Button4: TButton;
+    Chart2: TChart;
+    Series3: TLineSeries;
+    ListBox1: TListBox;
+    ListBox2: TListBox;
+    ListBox3: TListBox;
+    ListBox4: TListBox;
+    TabSheet1: TTabSheet;
+    Button5: TButton;
+    Button6: TButton;
+    Button7: TButton;
+    Chart3: TChart;
+    Series4: TLineSeries;
+    Series5: TLineSeries;
+    Series6: TPointSeries;
+    Series7: TPointSeries;
+    Series8: TPointSeries;
+    Series9: TPointSeries;
+    Series10: TPointSeries;
+    Series11: TPointSeries;
+    ListBox5: TListBox;
+    Edit6: TEdit;
+    OpenDialog1: TOpenDialog;
+    BitBtn2: TBitBtn;
+    Series12: TPointSeries;
+    Series13: TPointSeries;
+    Series14: TPointSeries;
+    Series15: TPointSeries;
+    Series16: TPointSeries;
+    Series17: TPointSeries;
+    BitBtn1: TBitBtn;
+    Edit7: TEdit;
+    procedure Button1Click(Sender: TObject);
+    procedure Button2Click(Sender: TObject);
+    procedure Button3Click(Sender: TObject);
+    procedure Button4Click(Sender: TObject);
+    procedure Button5Click(Sender: TObject);
+    procedure Button7Click(Sender: TObject);
+    procedure Button6Click(Sender: TObject);
+  type
+  TNetworkArchitecture = record
+    NumInput, NumHid1, NumHid2, NumOutput: Integer;
+  end;
+
+  TTrainedModel = record
+    Architecture: TNetworkArchitecture;
+    Weights1, Weights2, Weights3: TArray<TArray<Real>>;
+    Biases1, Biases2, Biases3: TArray<Real>;
+    FinalEpoch: Integer;
+    FinalMSE: Real;
+    FinalAccuracy: Real;
+    MseHistory: TArray<Real>;
+    LearningRate: Real;
+    Momentum: Real;
+    MinVals, MaxVals: TArray<Real>;
+  end;
+  private
+    { Private declarations }
+    fstop: Boolean;
+    procedure getdata;
+    procedure initweights;
+    function sigmoidderiv(y: Double): Double;
+    function sigmoid(x: Double): Double;
+    // Baca file teks berisi NCols angka per baris -> Data. Hasil = jumlah baris.
+    function loadmatrix(const fname: string; ncols: Integer;
+      var data: TArray<TArray<Real>>): Integer;
+    // Normalisasi min-max kolom 0 dan 1 memakai minv / maxv global
+    procedure normdata(var data: TArray<TArray<Real>>);
+    // Forward pass satu sampel memakai w1..w3, b1..b3 global
+    procedure fwd(const x: TArray<Real>; var a1, a2, o: TArray<Real>);
+    // Indeks neuron output terbesar
+    function argmax(const v: TArray<Real>; out mx: Real): Integer;
+    // Buat teaching signal (one-hot: IC FF Mst HO TO Sw) dari sinyal MENTAH heel/toe
+    // memakai aturan threshold. Harus dipanggil sebelum normalisasi.
+    procedure genlabels(const raw: TArray<TArray<Real>>; var lab: TArray<TArray<Real>>);
+    // Simpan label hasil generate ke file teks (untuk lampiran laporan)
+    procedure savelabels(const fname: string; const lab: TArray<TArray<Real>>);
+    // Tinggi titik label di grafik = nilai sinyal (ternormalisasi) pada sampel i,
+    // supaya titik menempel di kurva. FF dan TO di kurva toe, sisanya di kurva heel.
+    function labely(const d: TArray<TArray<Real>>; i, cls: Integer): Real;
+  public
+    { Public declarations }
+  end;
+
+var
+  Form2: TForm2;
+  lbltrain, dtrain, drecall, lblrecall : TArray<TArray<Real>>;
+  ndat : integer;          // jumlah sampel data training
+  ntrain : integer;       // jumlah sampel saat training (untuk sumbu X iterasi)
+  lr, alpha, errth : real;
+  nin, nh1, nh2, nout : integer;
+  w1,w2,w3 : TArray<TArray<Real>>;
+  b1,b2, b3 : TArray<Real>;
+  msenow: Real;            // MSE epoch terakhir
+  finepoch: Integer;       // jumlah epoch saat training selesai
+  finaccuracy: Real;       // akurasi training akhir (%)
+  epochmse: TArray<Real>;  // MSE di setiap epoch (untuk grafik error)
+  minv, maxv: array[0..1] of Real;
+
+
+implementation
+
+{$R *.dfm}
+
+const
+  maxepoch = 100000;   // batas epoch supaya training tidak berjalan selamanya
+  logevery = 100;      // MSE dicatat ke ListBox1 setiap sekian epoch
+  trainfile = 'training_project1.dat';
+  recallfile = 'recall_project1.dat';
+  // Aturan pelabelan fase gait (satuan sama dengan data FSR mentah).
+  // Noise saat kaki di udara <= ~0.03, kontak nyata mulai >= ~0.2,
+  // jadi thcontact di antara keduanya. Hasil label sama untuk TH 0.10-0.20.
+  thcontact = 0.15;
+  // Heel yang mulai terangkat turun di bawah nilai ini (heel puncak 1.4-1.9,
+  // saat HO mulai <= 0.23). Hasil label sama untuk 0.5-0.7.
+  thheel = 0.6;
+
+function TForm2.sigmoid(x: Double): Double;
+begin
+  if x < -45.0 then
+    Result := 0.0
+  else
+    Result := 1.0 / (1.0 + Exp(-x));
+end;
+
+// turunan sigmoid; y = output sigmoid (bukan input), hasilnya y * (1 - y)
+function TForm2.sigmoidderiv(y: Double): Double;
+begin
+  Result := y * (1.0 - y);
+end;
+
+function TForm2.labely(const d: TArray<TArray<Real>>; i, cls: Integer): Real;
+begin
+  // 1 = FF, 4 = TO -> kurva toe (kolom 1); 0 IC, 2 Mst, 3 HO, 5 MDSW -> kurva heel (kolom 0)
+  if (cls = 1) or (cls = 4) then
+    Result := d[i][1]
+  else
+    Result := d[i][0];
+end;
+
+function TForm2.loadmatrix(const fname: string; ncols: Integer;
+  var data: TArray<TArray<Real>>): Integer;
+var
+  sl: TStringList;
+  parts: TArray<string>;
+  fs: TFormatSettings;
+  i, c, n: Integer;
+  line: string;
+begin
+  fs := TFormatSettings.Create;
+  fs.DecimalSeparator := '.';
+
+  sl := TStringList.Create;
+  try
+    sl.LoadFromFile(fname);
+    SetLength(data, sl.Count, ncols);
+    n := 0;
+    for i := 0 to sl.Count - 1 do
+    begin
+      line := Trim(sl[i]);
+      if line = '' then Continue;                    // lewati baris kosong
+      parts := line.Split([' ', #9], TStringSplitOptions.ExcludeEmpty);
+      if Length(parts) < ncols then
+        raise Exception.CreateFmt('%s line %d: not enough columns (need %d).',
+          [fname, i + 1, ncols]);
+      for c := 0 to ncols - 1 do
+        data[n][c] := StrToFloat(parts[c], fs);
+      Inc(n);
+    end;
+    SetLength(data, n);
+    Result := n;
+  finally
+    sl.Free;
+  end;
+end;
+
+procedure TForm2.normdata(var data: TArray<TArray<Real>>);
+var
+  i, c: Integer;
+begin
+  for i := 0 to High(data) do
+    for c := 0 to 1 do
+      if (maxv[c] - minv[c]) <> 0 then
+        data[i][c] := (data[i][c] - minv[c]) / (maxv[c] - minv[c]);
+end;
+
+procedure TForm2.fwd(const x: TArray<Real>; var a1, a2, o: TArray<Real>);
+var
+  j, k: Integer;
+  s: Real;
+begin
+  for j := 0 to nh1 - 1 do
+  begin
+    s := b1[j];
+    for k := 0 to nin - 1 do
+      s := s + x[k] * w1[k, j];
+    a1[j] := sigmoid(s);
+  end;
+
+  for j := 0 to nh2 - 1 do
+  begin
+    s := b2[j];
+    for k := 0 to nh1 - 1 do
+      s := s + a1[k] * w2[k, j];
+    a2[j] := sigmoid(s);
+  end;
+
+  for j := 0 to nout - 1 do
+  begin
+    s := b3[j];
+    for k := 0 to nh2 - 1 do
+      s := s + a2[k] * w3[k, j];
+    o[j] := sigmoid(s);
+  end;
+end;
+
+function TForm2.argmax(const v: TArray<Real>; out mx: Real): Integer;
+var
+  j: Integer;
+begin
+  mx := -1.0;
+  Result := -1;
+  for j := 0 to High(v) do
+    if v[j] > mx then
+    begin
+      mx := v[j];
+      Result := j;
+    end;
+end;
+
+procedure TForm2.genlabels(const raw: TArray<TArray<Real>>; var lab: TArray<TArray<Real>>);
+// Indeks kelas: 0=IC 1=FF 2=Mst 3=HO 4=TO 5=Sw
+var
+  i, k, cls, state: Integer;
+  heelon, toeon: Boolean;
+begin
+  SetLength(lab, Length(raw), 6);
+  state := 5;                                   // mulai dari swing
+  for i := 0 to High(raw) do
+  begin
+    heelon := raw[i][0] >= thcontact;
+    toeon  := raw[i][1] >= thcontact;
+    case state of
+      5, 4:   // Sw / TO sebelumnya: IC = heel mulai menapak, toe belum
+        if heelon and (not toeon) then cls := 0 else cls := 5;
+      0:      // IC: jadi FF begitu toe ikut menapak
+        if toeon then cls := 1 else cls := 0;
+      1, 2:   // FF / Mst: Mst selama heel masih menopang, lalu HO
+        if raw[i][0] >= thheel then cls := 2 else cls := 3;
+      3:      // HO: berlangsung sampai toe lepas -> TO
+        if toeon then cls := 3 else cls := 4;
+    else
+      cls := 5;
+    end;
+    for k := 0 to 5 do
+      lab[i][k] := 0.0;
+    lab[i][cls] := 1.0;
+    state := cls;
+  end;
+end;
+
+procedure TForm2.savelabels(const fname: string; const lab: TArray<TArray<Real>>);
+var
+  sl: TStringList;
+  i, k: Integer;
+  line: string;
+begin
+  sl := TStringList.Create;
+  try
+    for i := 0 to High(lab) do
+    begin
+      line := '';
+      for k := 0 to 5 do
+      begin
+        if k > 0 then line := line + ' ';
+        if lab[i][k] = 1 then line := line + '1' else line := line + '0';
+      end;
+      sl.Add(line);
+    end;
+    sl.SaveToFile(fname);
+  finally
+    sl.Free;
+  end;
+end;
+
+procedure TForm2.Button1Click(Sender: TObject);
+var
+  n, i, j: integer;
+begin
+  if not FileExists(trainfile) then
+  begin
+    ShowMessage('Training file "' + trainfile + '" not found.');
+    Exit;
+  end;
+  ndat := loadmatrix(trainfile, 2, dtrain);
+  if ndat = 0 then
+  begin
+    ShowMessage('Training file is empty.');
+    Exit;
+  end;
+
+  // buat label
+  genlabels(dtrain, lbltrain);
+  savelabels('gait_labels.txt', lbltrain);
+
+  // cari min / max training lalu normalisasi
+  minv[0] := dtrain[0, 0]; maxv[0] := dtrain[0, 0];
+  minv[1] := dtrain[0, 1]; maxv[1] := dtrain[0, 1];
+  for i := 1 to ndat - 1 do
+  begin
+    if dtrain[i, 0] < minv[0] then minv[0] := dtrain[i, 0];
+    if dtrain[i, 0] > maxv[0] then maxv[0] := dtrain[i, 0];
+    if dtrain[i, 1] < minv[1] then minv[1] := dtrain[i, 1];
+    if dtrain[i, 1] > maxv[1] then maxv[1] := dtrain[i, 1];
+  end;
+  normdata(dtrain);
+
+  // --- plot sinyal training (heel & toe) ---
+  Series1.Clear;
+  Series2.Clear;
+  for n := 0 to ndat - 1 do
+  begin
+    Series1.AddXY(n, dtrain[n, 0]);
+    Series2.AddXY(n, dtrain[n, 1]);
+  end;
+
+  // --- plot label fase gait: titik menempel di kurva heel / toe ---
+  Series12.Clear; Series13.Clear; Series14.Clear;
+  Series15.Clear; Series16.Clear; Series17.Clear;
+
+  for i := 0 to ndat - 1 do
+  begin
+    for j := 0 to 5 do
+    begin
+      if lbltrain[i, j] = 1 then
+      begin
+        case j of
+          0: Series12.AddXY(i, labely(dtrain, i, j));
+          1: Series13.AddXY(i, labely(dtrain, i, j));
+          2: Series14.AddXY(i, labely(dtrain, i, j));
+          3: Series15.AddXY(i, labely(dtrain, i, j));
+          4: Series16.AddXY(i, labely(dtrain, i, j));
+          5: Series17.AddXY(i, labely(dtrain, i, j));
+        end;
+        Break;
+      end;
+    end;
+  end;
+end;
+
+
+procedure TForm2.Button2Click(Sender: TObject);
+var
+  e, d, j, k: Integer;
+  toterr: Real;
+  errsig: Real;
+  updw, updb: Real;
+  nsamp: Integer;
+
+  act1, act2, actout: TArray<Real>;
+  delout, del2, del1: TArray<Real>;
+  pw1, pw2, pw3: TArray<TArray<Real>>;
+  pb1, pb2, pb3: TArray<Real>;
+
+  ncorrect, pcls, actual: Integer;
+  maxval: Real;
+begin
+  if Length(dtrain) = 0 then
+  begin
+    ShowMessage('Training data has not been loaded. Please load the data first.');
+    Exit;
+  end;
+
+  getdata;
+  initweights;
+
+  fstop := False;
+  Button2.Enabled := False;
+  Button3.Enabled := True;
+  try
+    ListBox1.Clear;
+    ListBox2.Clear;
+    ListBox3.Clear;
+    ListBox4.Clear;
+    Series3.Clear;
+
+    e := 0;
+    nsamp := Length(dtrain);
+    ntrain := nsamp;
+
+    SetLength(act1, nh1);
+    SetLength(act2, nh2);
+    SetLength(actout, nout);
+
+    SetLength(delout, nout);
+    SetLength(del2, nh2);
+    SetLength(del1, nh1);
+
+    SetLength(pw1, nin, nh1);
+    SetLength(pw2, nh1, nh2);
+    SetLength(pw3, nh2, nout);
+
+    SetLength(pb1, nh1);
+    SetLength(pb2, nh2);
+    SetLength(pb3, nout);
+
+    SetLength(epochmse, maxepoch);
+
+    while (not fstop) and (e < maxepoch) do
+    begin
+      Inc(e);
+      toterr := 0.0;
+      for d := 0 to High(dtrain) do
+      begin
+        // forward
+        fwd(dtrain[d], act1, act2, actout);
+
+        // error
+        for k := 0 to nout - 1 do
+          toterr := toterr + Sqr(lbltrain[d][k] - actout[k]);
+
+        // backprop: delta output
+        for j := 0 to nout - 1 do
+        begin
+          errsig := lbltrain[d][j] - actout[j];
+          delout[j] := errsig * sigmoidderiv(actout[j]);
+        end;
+
+        // delta hidden 2
+        for j := 0 to nh2 - 1 do
+        begin
+          errsig := 0.0;
+          for k := 0 to nout - 1 do
+            errsig := errsig + delout[k] * w3[j, k];
+          del2[j] := errsig * sigmoidderiv(act2[j]);
+        end;
+
+        // delta hidden 1
+        for j := 0 to nh1 - 1 do
+        begin
+          errsig := 0.0;
+          for k := 0 to nh2 - 1 do
+            errsig := errsig + del2[k] * w2[j, k];
+          del1[j] := errsig * sigmoidderiv(act1[j]);
+        end;
+
+        // update bobot dengan alpha: layer output
+        for j := 0 to nout - 1 do
+        begin
+          for k := 0 to nh2 - 1 do
+          begin
+            updw := (lr * delout[j] * act2[k]) + (alpha * pw3[k, j]);
+            w3[k, j] := w3[k, j] + updw;
+            pw3[k, j] := updw;
+          end;
+          updb := (lr * delout[j]) + (alpha * pb3[j]);
+          b3[j] := b3[j] + updb;
+          pb3[j] := updb;
+        end;
+
+        // hidden 2
+        for j := 0 to nh2 - 1 do
+        begin
+          for k := 0 to nh1 - 1 do
+          begin
+            updw := (lr * del2[j] * act1[k]) + (alpha * pw2[k, j]);
+            w2[k, j] := w2[k, j] + updw;
+            pw2[k, j] := updw;
+          end;
+          updb := (lr * del2[j]) + (alpha * pb2[j]);
+          b2[j] := b2[j] + updb;
+          pb2[j] := updb;
+        end;
+
+        // hidden 1
+        for j := 0 to nh1 - 1 do
+        begin
+          for k := 0 to nin - 1 do
+          begin
+            updw := (lr * del1[j] * dtrain[d][k]) + (alpha * pw1[k, j]);
+            w1[k, j] := w1[k, j] + updw;
+            pw1[k, j] := updw;
+          end;
+          updb := (lr * del1[j]) + (alpha * pb1[j]);
+          b1[j] := b1[j] + updb;
+          pb1[j] := updb;
+        end;
+      end;
+
+      msenow := toterr / nsamp;
+      epochmse[e - 1] := msenow;
+
+      if (e = 1) or (e mod logevery = 0) then
+      begin
+        ListBox1.Items.Add(Format('Iterasi: %d, MSE: %.8f', [e * nsamp, msenow]));
+        ListBox1.ItemIndex := ListBox1.Items.Count - 1;
+      end;
+      if e mod 10 = 0 then
+        Application.ProcessMessages;
+
+      if msenow <= errth then
+      begin
+        ListBox1.Items.Add(Format('Training selesai karena MSE mencapai target pada iterasi %d (MSE: %.8f).',
+          [e * nsamp, msenow]));
+        Break;
+      end;
+    end;
+
+    finepoch := e;
+    SetLength(epochmse, e);
+
+    if fstop then
+      ListBox1.Items.Add(Format('Training dihentikan pada iterasi ke-%d (MSE: %.8f).',
+        [e * nsamp, msenow]))
+    else if msenow > errth then
+      ListBox1.Items.Add(Format('Training berhenti: batas %d epoch tercapai (MSE: %.8f).',
+        [maxepoch, msenow]));
+
+    // Accuration
+    ncorrect := 0;
+    for d := 0 to High(dtrain) do
+    begin
+      fwd(dtrain[d], act1, act2, actout);
+      pcls := argmax(actout, maxval);
+
+      actual := -1;
+      for j := 0 to nout - 1 do
+        if lbltrain[d, j] = 1 then
+        begin
+          actual := j;
+          Break;
+        end;
+
+      if pcls = actual then
+        Inc(ncorrect);
+    end;
+
+    if nsamp > 0 then
+      finaccuracy := (ncorrect / nsamp) * 100.0
+    else
+      finaccuracy := 0.0;
+
+    ListBox1.Items.Add('---');
+    ListBox1.Items.Add(Format('Akurasi Training: %.2f %% (%d/%d)',
+      [finaccuracy, ncorrect, nsamp]));
+    ListBox1.ItemIndex := ListBox1.Items.Count - 1;
+
+    // grafik error
+    Series3.Clear;
+    for e := 1 to finepoch do
+      Series3.AddXY(e * nsamp, epochmse[e - 1]);
+
+    // bobot & bias
+    ListBox2.Clear;
+    ListBox2.Items.Add('--- Bobot w1 ---');
+    for k := 0 to nin - 1 do
+      for j := 0 to nh1 - 1 do
+        ListBox2.Items.Add(Format('w1[%d, %d]: %.8f', [k, j, w1[k, j]]));
+    ListBox2.Items.Add('');
+    ListBox2.Items.Add('--- Bias b1 ---');
+    for j := 0 to nh1 - 1 do
+      ListBox2.Items.Add(Format('b1[%d]: %.8f', [j, b1[j]]));
+
+    ListBox3.Clear;
+    ListBox3.Items.Add('--- Bobot w2 ---');
+    for k := 0 to nh1 - 1 do
+      for j := 0 to nh2 - 1 do
+        ListBox3.Items.Add(Format('w2[%d, %d]: %.8f', [k, j, w2[k, j]]));
+    ListBox3.Items.Add('');
+    ListBox3.Items.Add('--- Bias b2 ---');
+    for j := 0 to nh2 - 1 do
+      ListBox3.Items.Add(Format('b2[%d]: %.8f', [j, b2[j]]));
+
+    ListBox4.Clear;
+    ListBox4.Items.Add('--- Bobot w3 ---');
+    for k := 0 to nh2 - 1 do
+      for j := 0 to nout - 1 do
+        ListBox4.Items.Add(Format('w3[%d, %d]: %.8f', [k, j, w3[k, j]]));
+    ListBox4.Items.Add('');
+    ListBox4.Items.Add('--- Bias b3 ---');
+    for j := 0 to nout - 1 do
+      ListBox4.Items.Add(Format('b3[%d]: %.8f', [j, b3[j]]));
+  finally
+    Button2.Enabled := True;
+    Button3.Enabled := False;
+  end;
+end;
+
+procedure TForm2.Button3Click(Sender: TObject);
+begin
+  fstop := True;
+end;
+
+procedure TForm2.Button4Click(Sender: TObject);
+var
+  Model: TTrainedModel;
+  sdlg: TSaveDialog;
+  jobj, jarch, jw, jb, jnorm: TJSONObject;
+  jarr, jin, jmm: TJSONArray;
+  i: Integer;
+  jstr: string;
+begin
+  if Length(w1) = 0 then
+  begin
+    ShowMessage('No model available. Please train or load a model first.');
+    Exit;
+  end;
+
+  sdlg := TSaveDialog.Create(Self);
+  try
+    sdlg.Filter := 'JSON Model File (*.json)|*.json';
+    sdlg.DefaultExt := 'json';
+    if not sdlg.Execute then Exit;
+
+    Model.Architecture.NumInput := nin;
+    Model.Architecture.NumHid1 := nh1;
+    Model.Architecture.NumHid2 := nh2;
+    Model.Architecture.NumOutput := nout;
+    Model.Weights1 := w1; Model.Weights2 := w2; Model.Weights3 := w3;
+    Model.Biases1 := b1; Model.Biases2 := b2; Model.Biases3 := b3;
+    Model.FinalEpoch := finepoch;
+    Model.FinalMSE := msenow;
+    Model.FinalAccuracy := finaccuracy;
+    Model.MseHistory := epochmse;
+    Model.LearningRate := lr;
+    Model.Momentum := alpha;
+    SetLength(Model.MinVals, 2); SetLength(Model.MaxVals, 2);
+    Model.MinVals[0] := minv[0]; Model.MinVals[1] := minv[1];
+    Model.MaxVals[0] := maxv[0]; Model.MaxVals[1] := maxv[1];
+
+    jobj := TJSONObject.Create;
+    try
+      jarch := TJSONObject.Create;
+      jarch.AddPair('n_in',   TJSONNumber.Create(Model.Architecture.NumInput));
+      jarch.AddPair('n_hid1', TJSONNumber.Create(Model.Architecture.NumHid1));
+      jarch.AddPair('n_hid2', TJSONNumber.Create(Model.Architecture.NumHid2));
+      jarch.AddPair('n_out',  TJSONNumber.Create(Model.Architecture.NumOutput));
+      jobj.AddPair('architecture', jarch);
+
+      jw := TJSONObject.Create;
+      jarr := TJSONArray.Create; for var row in Model.Weights1 do begin jin := TJSONArray.Create; for var val in row do jin.Add(val); jarr.AddElement(jin); end; jw.AddPair('w1', jarr);
+      jarr := TJSONArray.Create; for var row in Model.Weights2 do begin jin := TJSONArray.Create; for var val in row do jin.Add(val); jarr.AddElement(jin); end; jw.AddPair('w2', jarr);
+      jarr := TJSONArray.Create; for var row in Model.Weights3 do begin jin := TJSONArray.Create; for var val in row do jin.Add(val); jarr.AddElement(jin); end; jw.AddPair('w3', jarr);
+      jobj.AddPair('weights', jw);
+
+      jb := TJSONObject.Create;
+      jarr := TJSONArray.Create; for var val in Model.Biases1 do jarr.Add(val); jb.AddPair('b1', jarr);
+      jarr := TJSONArray.Create; for var val in Model.Biases2 do jarr.Add(val); jb.AddPair('b2', jarr);
+      jarr := TJSONArray.Create; for var val in Model.Biases3 do jarr.Add(val); jb.AddPair('b3', jarr);
+      jobj.AddPair('biases', jb);
+
+      jnorm := TJSONObject.Create;
+      jmm := TJSONArray.Create; for var val in Model.MinVals do jmm.Add(val); jnorm.AddPair('min_vals', jmm);
+      jmm := TJSONArray.Create; for var val in Model.MaxVals do jmm.Add(val); jnorm.AddPair('max_vals', jmm);
+      jobj.AddPair('normalization', jnorm);
+
+      jobj.AddPair('final_epoch', TJSONNumber.Create(Model.FinalEpoch));
+      jobj.AddPair('final_mse',   TJSONNumber.Create(Model.FinalMSE));
+      jobj.AddPair('final_accuracy', TJSONNumber.Create(Model.FinalAccuracy));
+      jobj.AddPair('learning_rate', TJSONNumber.Create(Model.LearningRate));
+      jobj.AddPair('momentum', TJSONNumber.Create(Model.Momentum));
+      jobj.AddPair('n_train', TJSONNumber.Create(ntrain));
+
+      jarr := TJSONArray.Create;
+      for i := 0 to Length(Model.MseHistory) - 1 do
+        jarr.Add(Model.MseHistory[i]);
+      jobj.AddPair('mse_history', jarr);
+
+      jstr := jobj.ToJSON;
+      TFile.WriteAllText(sdlg.FileName, jstr);
+      ShowMessage('Model saved successfully to ' + sdlg.FileName);
+    finally
+      jobj.Free;
+    end;
+  finally
+    sdlg.Free;
+  end;
+end;
+
+procedure TForm2.Button5Click(Sender: TObject);
+var
+  nrec, n: Integer;
+begin
+  if not FileExists(recallfile) then
+  begin
+    ShowMessage('Recall file "' + recallfile + '" not found.');
+    Exit;
+  end;
+
+  // normalisasi butuh min/max dari data training
+  if (maxv[0] - minv[0] = 0) or (maxv[1] - minv[1] = 0) then
+  begin
+    ShowMessage('Load the training data (or a model) first so the normalization values are available.');
+    Exit;
+  end;
+
+  nrec := loadmatrix(recallfile, 2, drecall);
+  if nrec = 0 then
+  begin
+    ShowMessage('Recall file is empty.');
+    Exit;
+  end;
+
+  // label recall (buat akurasi recall aja)
+  genlabels(drecall, lblrecall);
+  savelabels('gait_recall_labels.txt', lblrecall);
+
+  normdata(drecall);
+
+  Series4.Clear;
+  Series5.Clear;
+  for n := 0 to nrec - 1 do
+  begin
+    Series4.AddXY(n, drecall[n, 0]);
+    Series5.AddXY(n, drecall[n, 1]);
+  end;
+end;
+
+procedure TForm2.Button6Click(Sender: TObject);
+var
+  odlg: TOpenDialog;
+  jstr: string;
+  jobj, jarch, jw, jb, jnorm: TJSONObject;
+  jarr, jin, jmm: TJSONArray;
+  i, j: Integer;
+  fs: TFormatSettings;
+begin
+  fs := TFormatSettings.Create;
+  fs.DecimalSeparator := '.';
+
+  odlg := TOpenDialog.Create(Self);
+  try
+    odlg.Filter := 'JSON Model File (*.json)|*.json';
+    if not odlg.Execute then Exit;
+
+    jstr := TFile.ReadAllText(odlg.FileName);
+    jobj := TJSONObject.ParseJSONValue(jstr) as TJSONObject;
+    if jobj = nil then
+    begin
+      ShowMessage('Error: Invalid JSON file.');
+      Exit;
+    end;
+
+    try
+      jarch := jobj.GetValue<TJSONObject>('architecture');
+      nin   := jarch.GetValue<Integer>('n_in');
+      nh1 := jarch.GetValue<Integer>('n_hid1');
+      nh2 := jarch.GetValue<Integer>('n_hid2');
+      nout  := jarch.GetValue<Integer>('n_out');
+
+      SetLength(w1, nin, nh1); SetLength(b1, nh1);
+      SetLength(w2, nh1, nh2); SetLength(b2, nh2);
+      SetLength(w3, nh2, nout); SetLength(b3, nout);
+
+      jw := jobj.GetValue<TJSONObject>('weights');
+      jarr := jw.GetValue('w1') as TJSONArray; for i := 0 to High(w1) do begin jin := jarr.Items[i] as TJSONArray; for j := 0 to High(w1[i]) do w1[i, j] := jin.Items[j].AsType<Real>; end;
+      jarr := jw.GetValue('w2') as TJSONArray; for i := 0 to High(w2) do begin jin := jarr.Items[i] as TJSONArray; for j := 0 to High(w2[i]) do w2[i, j] := jin.Items[j].AsType<Real>; end;
+      jarr := jw.GetValue('w3') as TJSONArray; for i := 0 to High(w3) do begin jin := jarr.Items[i] as TJSONArray; for j := 0 to High(w3[i]) do w3[i, j] := jin.Items[j].AsType<Real>; end;
+
+      jb := jobj.GetValue<TJSONObject>('biases');
+      jarr := jb.GetValue('b1') as TJSONArray; for i := 0 to High(b1) do b1[i] := jarr.Items[i].AsType<Real>;
+      jarr := jb.GetValue('b2') as TJSONArray; for i := 0 to High(b2) do b2[i] := jarr.Items[i].AsType<Real>;
+      jarr := jb.GetValue('b3') as TJSONArray; for i := 0 to High(b3) do b3[i] := jarr.Items[i].AsType<Real>;
+
+      if jobj.FindValue('normalization') <> nil then
+      begin
+        jnorm := jobj.GetValue<TJSONObject>('normalization');
+        jmm := jnorm.GetValue('min_vals') as TJSONArray;
+        minv[0] := jmm.Items[0].AsType<Real>;
+        minv[1] := jmm.Items[1].AsType<Real>;
+        jmm := jnorm.GetValue('max_vals') as TJSONArray;
+        maxv[0] := jmm.Items[0].AsType<Real>;
+        maxv[1] := jmm.Items[1].AsType<Real>;
+      end;
+
+      finepoch := jobj.GetValue<Integer>('final_epoch');
+      msenow := jobj.GetValue<Real>('final_mse');
+      lr := jobj.GetValue<Real>('learning_rate');
+      alpha := jobj.GetValue<Real>('momentum');
+
+      if jobj.FindValue('final_accuracy') <> nil then
+        finaccuracy := jobj.GetValue<Real>('final_accuracy')
+      else
+        finaccuracy := 0.0;
+
+      // jumlah sampel training
+      if jobj.FindValue('n_train') <> nil then
+        ntrain := jobj.GetValue<Integer>('n_train')
+      else
+        ntrain := Length(dtrain);
+      if ntrain < 1 then ntrain := 1;
+
+      jarr := jobj.GetValue('mse_history') as TJSONArray;
+      SetLength(epochmse, jarr.Count);
+      for i := 0 to jarr.Count - 1 do
+        epochmse[i] := jarr.Items[i].AsType<Real>;
+
+      Edit1.Text := IntToStr(nh1);
+      Edit2.Text := IntToStr(nh2);
+      Edit3.Text := FloatToStr(lr, fs);
+      Edit4.Text := FloatToStr(alpha, fs);
+
+      Series3.Clear;
+      for i := 0 to High(epochmse) do
+        Series3.AddXY((i + 1) * ntrain, epochmse[i]);
+
+      ListBox1.Clear;
+      ListBox1.Items.Add('--- Model berhasil dimuat dari file ---');
+      ListBox1.Items.Add(Format('Arsitektur: %d-%d-%d-%d', [nin, nh1, nh2, nout]));
+      ListBox1.Items.Add(Format('Training selesai pada iterasi %d (epoch %d) dengan MSE %.8f',
+        [finepoch * ntrain, finepoch, msenow]));
+      ListBox1.Items.Add(Format('Akurasi Tersimpan: %.2f %%', [finaccuracy]));
+
+      ShowMessage('Model loaded successfully!');
+    finally
+      jobj.Free;
+    end;
+  finally
+    odlg.Free;
+  end;
+end;
+
+// Recall: forward pass saja, tanpa belajar.
+// Confidence = nilai neuron output terbesar.
+// Event gait (IC, FF, Mst, HO, TO) dicatat ke gait_events.txt saat kelas
+// prediksi berpindah masuk ke kelas tersebut.
+procedure TForm2.Button7Click(Sender: TObject);
+var
+  i, j, pcls: Integer;
+  maxval: Real;
+  oh1, oh2, oout: TArray<Real>;
+  clsname: array[0..5] of string;
+  evn: array[0..4] of string;
+  outstr: string;
+  totconf: Real;
+  avgconf: Real;
+  actual, okall, oknew, nnew: Integer;
+  verdict: string;
+  prevp, prevt: Integer;
+  lineann, linetgt: string;
+  evann, evtgt, evall: TStringList;
+begin
+  if Length(drecall) = 0 then
+  begin
+    ShowMessage('Recall data has not been loaded. Please load the data first.');
+    Exit;
+  end;
+
+  if (nin = 0) or (nout = 0) or (Length(w1) = 0) then
+  begin
+    ShowMessage('The network has not been initialized or trained. Please train it first.');
+    Exit;
+  end;
+  Series6.Clear; Series7.Clear; Series8.Clear;
+  Series9.Clear; Series10.Clear; Series11.Clear;
+
+  clsname[0] := 'IC'; clsname[1] := 'FF'; clsname[2] := 'MidStance';
+  clsname[3] := 'HO'; clsname[4] := 'TO'; clsname[5] := 'MidSwing';
+
+  evn[0] := 'IC'; evn[1] := 'FF'; evn[2] := 'Mst';
+  evn[3] := 'HO'; evn[4] := 'TO';
+
+  SetLength(oh1, nh1);
+  SetLength(oh2, nh2);
+  SetLength(oout, nout);
+  ListBox5.Clear;
+  totconf := 0.0;
+  okall := 0;
+  oknew := 0;
+  nnew := 0;
+  prevp := -2;
+  prevt := -2;
+  lineann := '';
+  linetgt := '';
+
+  evann := TStringList.Create;
+  evtgt := TStringList.Create;
+  evall := TStringList.Create;
+  try
+    for i := 0 to High(drecall) do
+    begin
+      fwd(drecall[i], oh1, oh2, oout);
+      pcls := argmax(oout, maxval);
+
+      if pcls <> -1 then
+        totconf := totconf + maxval;
+
+      outstr := Format('Data ke-%d  Output ANN: [', [i]);
+      for j := 0 to nout - 1 do
+      begin
+        outstr := outstr + Format('%.4f', [oout[j]]);
+        if j < nout - 1 then
+          outstr := outstr + ', ';
+      end;
+      outstr := outstr + ']';
+      ListBox5.Items.Add(outstr);
+
+      // kunci jawaban
+      actual := -1;
+      if i < Length(lblrecall) then
+        for j := 0 to nout - 1 do
+          if lblrecall[i][j] = 1 then
+          begin
+            actual := j;
+            Break;
+          end;
+
+      if pcls = actual then
+      begin
+        Inc(okall);
+        verdict := 'BENAR';
+      end
+      else
+        verdict := 'SALAH';
+
+      // catat event hasil ANN
+      if (pcls >= 0) and (pcls <= 4) and (pcls <> prevp) then
+      begin
+        lineann := lineann + evn[pcls] + '@' + IntToStr(i) + ' ';
+        if pcls = 4 then
+        begin
+          evann.Add('ANN: ' + Trim(lineann));
+          lineann := '';
+        end;
+      end;
+      prevp := pcls;
+
+      // catat event target
+      if (actual >= 0) and (actual <= 4) and (actual <> prevt) then
+      begin
+        linetgt := linetgt + evn[actual] + '@' + IntToStr(i) + ' ';
+        if actual = 4 then
+        begin
+          evtgt.Add('Target: ' + Trim(linetgt));
+          linetgt := '';
+        end;
+      end;
+      prevt := actual;
+
+      // sampel setelah ntrain dianggap data baru, dihitung terpisah
+      if i >= ntrain then
+      begin
+        Inc(nnew);
+        if pcls = actual then
+          Inc(oknew);
+      end;
+
+      if pcls <> -1 then
+      begin
+        if actual <> -1 then
+          ListBox5.Items.Add(Format('Prediksi: ''%s'' (Confidence: %.2f%%) | Target: %s | %s',
+            [clsname[pcls], maxval * 100,
+             clsname[actual], verdict]))
+        else
+          ListBox5.Items.Add(Format('Prediksi: ''%s'' (Confidence: %.2f%%)',
+            [clsname[pcls], maxval * 100]));
+        // titik prediksi menempel di kurva heel / toe
+        case pcls of
+          0: Series6.AddXY(i, labely(drecall, i, pcls));
+          1: Series7.AddXY(i, labely(drecall, i, pcls));
+          2: Series8.AddXY(i, labely(drecall, i, pcls));
+          3: Series9.AddXY(i, labely(drecall, i, pcls));
+          4: Series10.AddXY(i, labely(drecall, i, pcls));
+          5: Series11.AddXY(i, labely(drecall, i, pcls));
+        end;
+      end
+      else
+        ListBox5.Items.Add('Prediksi: Gagal menentukan kelas.');
+      ListBox5.Items.Add('');
+    end;
+
+    // sisa event yang belum ditutup oleh TO
+    if lineann <> '' then evann.Add('ANN: ' + Trim(lineann));
+    if linetgt <> '' then evtgt.Add('Target: ' + Trim(linetgt));
+
+    // simpan ringkasan event ke file (untuk lampiran laporan)
+    evall.Add('Event gait per siklus (nama@sampel ke-)');
+    evall.AddStrings(evann);
+    evall.AddStrings(evtgt);
+    evall.SaveToFile('gait_events.txt');
+
+    avgconf := (totconf / Length(drecall)) * 100.0;
+
+    ListBox5.Items.Insert(0, '');
+    ListBox5.Items.Insert(0, Format('AVG Confidence: %.2f%%', [avgconf]));
+    if nnew > 0 then
+      ListBox5.Items.Insert(0, Format('Akurasi data BARU (sampel ke-%d dst): %.2f%% (%d/%d)',
+        [ntrain, oknew / nnew * 100.0, oknew, nnew]));
+    ListBox5.Items.Insert(0, Format('Akurasi recall (semua data): %.2f%% (%d/%d)',
+      [okall / Length(drecall) * 100.0, okall, Length(drecall)]));
+
+    Edit6.Text := Format('Confidence: %.2f%%', [avgconf]);
+    Edit7.Text := Format('Accuracy: %.2f%%', [okall / Length(drecall) * 100.0]);
+  finally
+    evann.Free;
+    evtgt.Free;
+    evall.Free;
+  end;
+end;
+
+procedure Tform2.getdata;
+var
+  fs: TFormatSettings;
+begin
+  fs := TFormatSettings.Create;
+  fs.DecimalSeparator := '.';
+
+  lr := StrToFloat(Edit3.Text, fs);
+  alpha := StrToFloat(Edit4.Text, fs);
+  errth := StrToFloat(Edit5.Text, fs);
+
+  nin := 2;
+  nh1 := StrToInt(Edit1.Text);
+  nh2 := StrToInt(Edit2.Text);
+  nout := 6;
+
+  if (nh1 < 1) or (nh2 < 1) then
+    raise Exception.Create('Hidden layer neuron count must be at least 1.');
+end;
+
+// Bobot awal acak -0.5..0.5, bias 0
+procedure Tform2.initweights;
+var
+  i, j : integer;
+begin
+  SetLength(w1, nin, nh1);
+  SetLength(w2, nh1, nh2);
+  SetLength(w3, nh2, nout);
+
+  for i := 0 to nin - 1 do
+    for j := 0 to nh1 - 1 do
+      w1[i, j] := (Random - 0.5);
+
+  for i := 0 to nh1 - 1 do
+    for j := 0 to nh2 - 1 do
+      w2[i, j] := (Random - 0.5);
+
+  for i := 0 to nh2 - 1 do
+    for j := 0 to nout - 1 do
+      w3[i, j] := (Random - 0.5);
+
+  SetLength(b1, nh1);
+  SetLength(b2, nh2);
+  SetLength(b3, nout);
+
+  for i := 0 to nh1 - 1 do b1[i] := 0.0;
+  for i := 0 to nh2 - 1 do b2[i] := 0.0;
+  for i := 0 to nout - 1 do b3[i] := 0.0;
+end;
+
+initialization
+  Randomize;
+
+end.
